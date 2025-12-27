@@ -1,19 +1,91 @@
 local ToggleRunner = {}
 ToggleRunner.__index = ToggleRunner
 
+local function GetEnv()
+	if typeof(getgenv) == "function" then
+		local ok, env = pcall(getgenv)
+		if ok and type(env) == "table" then
+			return env
+		end
+	end
+	return _G
+end
+
+local function GetGameRef()
+	local g = rawget(_G, "game") or game
+	if typeof(cloneref) == "function" then
+		local ok, cg = pcall(cloneref, g)
+		if ok and cg then
+			return cg
+		end
+	end
+	return g
+end
+
+local function ResolveServices(Config)
+	local Env = GetEnv()
+
+	-- Try passed-in first, then globals
+	local Services =
+		(Config and Config.Services)
+		or rawget(Env, "Services")
+		or rawget(_G, "Services")
+		or rawget(_G, "shared") and rawget(shared, "Services")
+
+	if type(Services) ~= "table" then
+		Services = {}
+	end
+
+	local RunService =
+		Services.RunService
+		or (Config and Config.RunService)
+		or rawget(Env, "RunService")
+		or rawget(_G, "RunService")
+		or rawget(_G, "shared") and rawget(shared, "RunService")
+
+	if not RunService and not (Config and Config.DisableAutoServices) then
+		local g = GetGameRef()
+		if g and type(g.GetService) == "function" then
+			local ok, rs = pcall(g.GetService, g, "RunService")
+			if ok then
+				RunService = rs
+				Services.RunService = rs
+			end
+		end
+	end
+
+	return Services, RunService
+end
+
+local function ResolveFluent(Config)
+	local Env = GetEnv()
+
+	local Fluent =
+		(Config and Config.Fluent)
+		or rawget(Env, "Fluent")
+		or rawget(_G, "Fluent")
+		or rawget(_G, "shared") and rawget(shared, "Fluent")
+
+	local Options =
+		(Config and Config.Options)
+		or (Fluent and Fluent.Options)
+		or rawget(Env, "Options")
+		or {}
+
+	return Fluent, Options
+end
+
 function ToggleRunner.New(Config)
 	Config = Config or {}
 
 	local Self = setmetatable({}, ToggleRunner)
 
-	Self.Services = Config.Services or rawget(_G, "Services")
-	Self.RunService = (Self.Services and Self.Services.RunService) or nil
-
-	Self.Fluent = Config.Fluent or rawget(_G, "Fluent")
-	Self.Options = Config.Options or (Self.Fluent and Self.Fluent.Options) or {}
+	Self.Services, Self.RunService = ResolveServices(Config)
+	Self.Fluent, Self.Options = ResolveFluent(Config)
 
 	Self.RootResolver = Config.RootResolver or function(Name)
-		return rawget(_G, Name)
+		local Env = GetEnv()
+		return rawget(Env, Name) or rawget(_G, Name)
 	end
 
 	Self.Entries = {} -- Flag -> {Thread, Conn, Opt, Callable, Mode, Threshold, PassState}
@@ -37,7 +109,7 @@ end
 function ToggleRunner:_HookFluentUnloadOnce()
 	if self.Hooked then return end
 
-	local Fluent = self.Fluent or rawget(_G, "Fluent")
+	local Fluent = self.Fluent
 	if typeof(Fluent) ~= "table" then return end
 
 	local UnloadSignal = rawget(Fluent, "Unloaded") or rawget(Fluent, "_unloaded") or rawget(Fluent, "Destroyed")
@@ -113,7 +185,7 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 	end
 
 	if not self.RunService then
-		warn("[ToggleRunner] Services.RunService is missing; falling back to 'spawn' mode.")
+		warn("[ToggleRunner] RunService missing; falling back to 'spawn' mode.")
 		return self:_StartLoop(Flag, OptObj, Callable, "spawn", Threshold, PassState)
 	end
 
