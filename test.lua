@@ -22,15 +22,21 @@ local function GetGameRef()
 	return g
 end
 
+local function Traceback(err)
+	if debug and type(debug.traceback) == "function" then
+		return debug.traceback(tostring(err), 2)
+	end
+	return tostring(err)
+end
+
 local function ResolveServices(Config)
 	local Env = GetEnv()
 
-	-- Try passed-in first, then globals
 	local Services =
 		(Config and Config.Services)
 		or rawget(Env, "Services")
 		or rawget(_G, "Services")
-		or rawget(_G, "shared") and rawget(shared, "Services")
+		or (rawget(_G, "shared") and rawget(shared, "Services"))
 
 	if type(Services) ~= "table" then
 		Services = {}
@@ -41,13 +47,13 @@ local function ResolveServices(Config)
 		or (Config and Config.RunService)
 		or rawget(Env, "RunService")
 		or rawget(_G, "RunService")
-		or rawget(_G, "shared") and rawget(shared, "RunService")
+		or (rawget(_G, "shared") and rawget(shared, "RunService"))
 
 	if not RunService and not (Config and Config.DisableAutoServices) then
 		local g = GetGameRef()
 		if g and type(g.GetService) == "function" then
 			local ok, rs = pcall(g.GetService, g, "RunService")
-			if ok then
+			if ok and rs then
 				RunService = rs
 				Services.RunService = rs
 			end
@@ -64,7 +70,7 @@ local function ResolveFluent(Config)
 		(Config and Config.Fluent)
 		or rawget(Env, "Fluent")
 		or rawget(_G, "Fluent")
-		or rawget(_G, "shared") and rawget(shared, "Fluent")
+		or (rawget(_G, "shared") and rawget(shared, "Fluent"))
 
 	local Options =
 		(Config and Config.Options)
@@ -83,27 +89,34 @@ function ToggleRunner.New(Config)
 	Self.Services, Self.RunService = ResolveServices(Config)
 	Self.Fluent, Self.Options = ResolveFluent(Config)
 
+	Self.ErrorMode = Config.ErrorMode or "silent"
+	Self.ErrorCallback = Config.ErrorCallback
+
 	Self.RootResolver = Config.RootResolver or function(Name)
 		local Env = GetEnv()
 		return rawget(Env, Name) or rawget(_G, Name)
 	end
 
-	Self.Entries = {} -- Flag -> {Thread, Conn, Opt, Callable, Mode, Threshold, PassState}
+	Self.Entries = {}
 	Self.Hooked = false
 
 	return Self
 end
 
-function ToggleRunner:StopAll()
-	for Flag, Entry in pairs(self.Entries) do
-		if Entry.Conn then
-			pcall(function() Entry.Conn:Disconnect() end)
-		end
-		if Entry.Thread then
-			pcall(function() task.cancel(Entry.Thread) end)
-		end
-		self.Entries[Flag] = nil
+function ToggleRunner:_HandleError(Flag, Trace)
+	if self.ErrorCallback then
+		pcall(self.ErrorCallback, Flag, Trace)
 	end
+
+	if self.ErrorMode == "warn" then
+		warn(("[ToggleRunner][%s]\n%s"):format(tostring(Flag), tostring(Trace)))
+	elseif self.ErrorMode == "throw" then
+		error(("[ToggleRunner][%s]\n%s"):format(tostring(Flag), tostring(Trace)), 0)
+	end
+end
+
+function ToggleRunner:SetErrorMode(Mode)
+	self.ErrorMode = Mode or "silent"
 end
 
 function ToggleRunner:_HookFluentUnloadOnce()
@@ -134,6 +147,18 @@ function ToggleRunner:_HookFluentUnloadOnce()
 	end
 end
 
+function ToggleRunner:StopAll()
+	for Flag, Entry in pairs(self.Entries) do
+		if Entry.Conn then
+			pcall(function() Entry.Conn:Disconnect() end)
+		end
+		if Entry.Thread then
+			pcall(function() task.cancel(Entry.Thread) end)
+		end
+		self.Entries[Flag] = nil
+	end
+end
+
 function ToggleRunner:_StopFlag(Flag)
 	local Entry = self.Entries[Flag]
 	if not Entry then return end
@@ -146,74 +171,6 @@ function ToggleRunner:_StopFlag(Flag)
 	end
 
 	self.Entries[Flag] = nil
-end
-
-function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassState)
-	self:_StopFlag(Flag)
-
-	local Entry = {
-		Opt = OptObj,
-		Callable = Callable,
-		Mode = Mode,
-		Threshold = Threshold,
-		PassState = PassState,
-	}
-	self.Entries[Flag] = Entry
-
-	local function Dispatch()
-		task.spawn(function()
-			if PassState then
-				pcall(Entry.Callable, true)
-			else
-				pcall(Entry.Callable)
-			end
-		end)
-	end
-
-	if Mode == "spawn" then
-		Entry.Thread = task.spawn(function()
-			while self.Entries[Flag] and Entry.Opt.Value do
-				Dispatch()
-				if Threshold > 0 then
-					task.wait(Threshold)
-				else
-					task.wait()
-				end
-			end
-		end)
-		return
-	end
-
-	if not self.RunService then
-		warn("[ToggleRunner] RunService missing; falling back to 'spawn' mode.")
-		return self:_StartLoop(Flag, OptObj, Callable, "spawn", Threshold, PassState)
-	end
-
-	if Mode == "Heartbeat" then
-		local Acc = 0
-		Entry.Conn = self.RunService.Heartbeat:Connect(function(Dt)
-			if not self.Entries[Flag] or not Entry.Opt.Value then return end
-			Acc = Acc + Dt
-			if Acc >= Threshold then
-				Acc = (Threshold > 0) and (Acc - Threshold) or 0
-				Dispatch()
-			end
-		end)
-		return
-	end
-
-	if Mode == "RenderStepped" then
-		local Acc = 0
-		Entry.Conn = self.RunService.RenderStepped:Connect(function(Dt)
-			if not self.Entries[Flag] or not Entry.Opt.Value then return end
-			Acc = Acc + Dt
-			if Acc >= Threshold then
-				Acc = (Threshold > 0) and (Acc - Threshold) or 0
-				Dispatch()
-			end
-		end)
-		return
-	end
 end
 
 function ToggleRunner:_WrapPath(Path)
@@ -247,8 +204,87 @@ function ToggleRunner:_ToCallable(Value)
 	return nil
 end
 
+function ToggleRunner:_Dispatch(Flag, Callable, PassState, StateValue)
+	local ok, res = xpcall(function()
+		if PassState then
+			return Callable(StateValue)
+		else
+			return Callable()
+		end
+	end, Traceback)
+
+	if not ok then
+		self:_HandleError(Flag, res)
+	end
+end
+
+function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassState)
+	self:_StopFlag(Flag)
+
+	local Entry = {
+		Opt = OptObj,
+		Callable = Callable,
+		Mode = Mode,
+		Threshold = Threshold,
+		PassState = PassState,
+	}
+	self.Entries[Flag] = Entry
+
+	local function DispatchTick()
+		task.spawn(function()
+			self:_Dispatch(Flag, Callable, PassState, true)
+		end)
+	end
+
+	if Mode == "spawn" then
+		Entry.Thread = task.spawn(function()
+			while self.Entries[Flag] and Entry.Opt.Value do
+				DispatchTick()
+				if Threshold > 0 then
+					task.wait(Threshold)
+				else
+					task.wait()
+				end
+			end
+		end)
+		return
+	end
+
+	if not self.RunService then
+		warn("[ToggleRunner] RunService missing; falling back to 'spawn' mode.")
+		return self:_StartLoop(Flag, OptObj, Callable, "spawn", Threshold, PassState)
+	end
+
+	if Mode == "Heartbeat" then
+		local Acc = 0
+		Entry.Conn = self.RunService.Heartbeat:Connect(function(Dt)
+			if not self.Entries[Flag] or not Entry.Opt.Value then return end
+			Acc = Acc + Dt
+			if Acc >= Threshold then
+				Acc = (Threshold > 0) and (Acc - Threshold) or 0
+				DispatchTick()
+			end
+		end)
+		return
+	end
+
+	if Mode == "RenderStepped" then
+		local Acc = 0
+		Entry.Conn = self.RunService.RenderStepped:Connect(function(Dt)
+			if not self.Entries[Flag] or not Entry.Opt.Value then return end
+			Acc = Acc + Dt
+			if Acc >= Threshold then
+				Acc = (Threshold > 0) and (Acc - Threshold) or 0
+				DispatchTick()
+			end
+		end)
+		return
+	end
+end
+
 function ToggleRunner:BindToggle(Opt, Flag, Func, Opts)
 	Opts = Opts or {}
+
 	local Mode = Opts.mode or "spawn"
 	local Threshold = tonumber(Opts.threshold) or 0
 	local PassState = Opts.passState == true
@@ -267,26 +303,27 @@ function ToggleRunner:BindToggle(Opt, Flag, Func, Opts)
 		Opt:OnChanged(function(State)
 			if State then
 				if OnCallable then
-					if PassState then pcall(OnCallable, true) else pcall(OnCallable) end
+					self:_Dispatch(Flag, OnCallable, PassState, true)
 				end
 			else
 				if OffCallable then
-					if PassState then pcall(OffCallable, false) else pcall(OffCallable) end
+					self:_Dispatch(Flag, OffCallable, PassState, false)
 				elseif OnCallable and PassState then
-					pcall(OnCallable, false)
+					self:_Dispatch(Flag, OnCallable, true, false)
 				end
 			end
 		end)
 
 		if Opt.Value and OnCallable then
-			if PassState then pcall(OnCallable, true) else pcall(OnCallable) end
+			self:_Dispatch(Flag, OnCallable, PassState, true)
 		elseif (not Opt.Value) and OffCallable then
-			if PassState then pcall(OffCallable, false) else pcall(OffCallable) end
+			self:_Dispatch(Flag, OffCallable, PassState, false)
 		end
 
 		return Opt
 	end
 
+	-- Loop modes
 	local Callable = self:_ToCallable(Func)
 	if not Callable then return Opt end
 
