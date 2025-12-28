@@ -289,6 +289,15 @@ function ToggleRunner:BindToggle(Opt, Flag, Func, Opts)
 	local Threshold = tonumber(Opts.threshold) or 0
 	local PassState = Opts.passState == true
 
+	local UserOnChanged = Opts.onChanged
+	local FireInitial = Opts.onChangedInitial ~= false
+
+	local function CallUser(State)
+		if type(UserOnChanged) == "function" then
+			pcall(UserOnChanged, State, Opt, Flag)
+		end
+	end
+
 	self:_HookFluentUnloadOnce()
 
 	if Mode == "Call" then
@@ -312,6 +321,7 @@ function ToggleRunner:BindToggle(Opt, Flag, Func, Opts)
 					self:_Dispatch(Flag, OnCallable, true, false)
 				end
 			end
+			CallUser(State)
 		end)
 
 		if Opt.Value and OnCallable then
@@ -320,12 +330,20 @@ function ToggleRunner:BindToggle(Opt, Flag, Func, Opts)
 			self:_Dispatch(Flag, OffCallable, PassState, false)
 		end
 
+		if FireInitial then
+			CallUser(Opt.Value)
+		end
+
 		return Opt
 	end
 
-	-- Loop modes
 	local Callable = self:_ToCallable(Func)
-	if not Callable then return Opt end
+	if not Callable then
+		if FireInitial then
+			CallUser(Opt.Value)
+		end
+		return Opt
+	end
 
 	Opt:OnChanged(function(State)
 		if State then
@@ -333,10 +351,15 @@ function ToggleRunner:BindToggle(Opt, Flag, Func, Opts)
 		else
 			self:_StopFlag(Flag)
 		end
+		CallUser(State)
 	end)
 
 	if Opt.Value then
 		self:_StartLoop(Flag, Opt, Callable, Mode, Threshold, PassState)
+	end
+
+	if FireInitial then
+		CallUser(Opt.Value)
 	end
 
 	return Opt
