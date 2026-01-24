@@ -273,6 +273,9 @@ function ToggleRunner:_IsModeSupported(M)
 	if M == "RenderStepped" then
 		return typeof(self.RunService.RenderStepped) == "RBXScriptSignal"
 	end
+	if M == "Stepped" then
+		return typeof(self.RunService.Stepped) == "RBXScriptSignal"
+	end
 	return false
 end
 
@@ -325,7 +328,6 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 	end
 
 	local function StartHeartbeat()
-		if not self.RunService then return end
 		local Acc = 0
 		local Conn = self.RunService.Heartbeat:Connect(function(Dt)
 			if not self.Entries[Flag] or not Entry.Opt.Value then return end
@@ -340,9 +342,22 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 	end
 
 	local function StartRenderStepped()
-		if not self.RunService then return end
 		local Acc = 0
 		local Conn = self.RunService.RenderStepped:Connect(function(Dt)
+			if not self.Entries[Flag] or not Entry.Opt.Value then return end
+			Acc = Acc + Dt
+			if Acc >= Threshold then
+				Acc = (Threshold > 0) and (Acc - Threshold) or 0
+				DispatchTick()
+			end
+		end)
+		Entry.Conns = Entry.Conns or {}
+		table.insert(Entry.Conns, Conn)
+	end
+
+	local function StartStepped()
+		local Acc = 0
+		local Conn = self.RunService.Stepped:Connect(function(_, Dt)
 			if not self.Entries[Flag] or not Entry.Opt.Value then return end
 			Acc = Acc + Dt
 			if Acc >= Threshold then
@@ -377,6 +392,11 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 					StartRenderStepped()
 					Started = true
 				end
+			elseif M == "Stepped" then
+				if self:_IsModeSupported("Stepped") then
+					StartStepped()
+					Started = true
+				end
 			end
 		end
 
@@ -408,6 +428,11 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 
 	if SelectedMode == "RenderStepped" then
 		StartRenderStepped()
+		return
+	end
+
+	if SelectedMode == "Stepped" then
+		StartStepped()
 		return
 	end
 end
