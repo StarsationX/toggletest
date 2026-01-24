@@ -152,8 +152,18 @@ function ToggleRunner:StopAll()
 		if Entry.Conn then
 			pcall(function() Entry.Conn:Disconnect() end)
 		end
+		if Entry.Conns then
+			for _, C in ipairs(Entry.Conns) do
+				pcall(function() C:Disconnect() end)
+			end
+		end
 		if Entry.Thread then
 			pcall(function() task.cancel(Entry.Thread) end)
+		end
+		if Entry.Threads then
+			for _, T in ipairs(Entry.Threads) do
+				pcall(function() task.cancel(T) end)
+			end
 		end
 		self.Entries[Flag] = nil
 	end
@@ -166,8 +176,18 @@ function ToggleRunner:_StopFlag(Flag)
 	if Entry.Conn then
 		pcall(function() Entry.Conn:Disconnect() end)
 	end
+	if Entry.Conns then
+		for _, C in ipairs(Entry.Conns) do
+			pcall(function() C:Disconnect() end)
+		end
+	end
 	if Entry.Thread then
 		pcall(function() task.cancel(Entry.Thread) end)
+	end
+	if Entry.Threads then
+		for _, T in ipairs(Entry.Threads) do
+			pcall(function() task.cancel(T) end)
+		end
 	end
 
 	self.Entries[Flag] = nil
@@ -237,6 +257,25 @@ function ToggleRunner:_NormalizeModes(Mode)
 	return { "spawn" }
 end
 
+function ToggleRunner:_IsModeSupported(M)
+	if M == "spawn" then
+		return true
+	end
+	if M == "Call" then
+		return true
+	end
+	if not self.RunService then
+		return false
+	end
+	if M == "Heartbeat" then
+		return typeof(self.RunService.Heartbeat) == "RBXScriptSignal"
+	end
+	if M == "RenderStepped" then
+		return typeof(self.RunService.RenderStepped) == "RBXScriptSignal"
+	end
+	return false
+end
+
 function ToggleRunner:_SelectMode(Mode)
 	local Modes = self:_NormalizeModes(Mode)
 
@@ -245,13 +284,8 @@ function ToggleRunner:_SelectMode(Mode)
 			return M
 		end
 
-		if self.RunService then
-			if M == "Heartbeat" and typeof(self.RunService.Heartbeat) == "RBXScriptSignal" then
-				return "Heartbeat"
-			end
-			if M == "RenderStepped" and typeof(self.RunService.RenderStepped) == "RBXScriptSignal" then
-				return "RenderStepped"
-			end
+		if self:_IsModeSupported(M) then
+			return M
 		end
 	end
 
@@ -270,16 +304,14 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 	}
 	self.Entries[Flag] = Entry
 
-	local SelectedMode = self:_SelectMode(Mode)
-	Entry.Mode = SelectedMode
-
 	local function DispatchTick()
 		task.spawn(function()
 			self:_Dispatch(Flag, Callable, PassState, true)
 		end)
 	end
 
-	if SelectedMode == "spawn" then
+	local function StartSpawn()
+		if Entry.Thread then return end
 		Entry.Thread = task.spawn(function()
 			while self.Entries[Flag] and Entry.Opt.Value do
 				DispatchTick()
@@ -290,37 +322,92 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 				end
 			end
 		end)
+	end
+
+	local function StartHeartbeat()
+		if not self.RunService then return end
+		local Acc = 0
+		local Conn = self.RunService.Heartbeat:Connect(function(Dt)
+			if not self.Entries[Flag] or not Entry.Opt.Value then return end
+			Acc = Acc + Dt
+			if Acc >= Threshold then
+				Acc = (Threshold > 0) and (Acc - Threshold) or 0
+				DispatchTick()
+			end
+		end)
+		Entry.Conns = Entry.Conns or {}
+		table.insert(Entry.Conns, Conn)
+	end
+
+	local function StartRenderStepped()
+		if not self.RunService then return end
+		local Acc = 0
+		local Conn = self.RunService.RenderStepped:Connect(function(Dt)
+			if not self.Entries[Flag] or not Entry.Opt.Value then return end
+			Acc = Acc + Dt
+			if Acc >= Threshold then
+				Acc = (Threshold > 0) and (Acc - Threshold) or 0
+				DispatchTick()
+			end
+		end)
+		Entry.Conns = Entry.Conns or {}
+		table.insert(Entry.Conns, Conn)
+	end
+
+	local Modes = self:_NormalizeModes(Mode)
+
+	if #Modes > 1 then
+		local Started = false
+
+		for _, M in ipairs(Modes) do
+			if M == "Call" then
+				continue
+			end
+
+			if M == "spawn" then
+				StartSpawn()
+				Started = true
+			elseif M == "Heartbeat" then
+				if self:_IsModeSupported("Heartbeat") then
+					StartHeartbeat()
+					Started = true
+				end
+			elseif M == "RenderStepped" then
+				if self:_IsModeSupported("RenderStepped") then
+					StartRenderStepped()
+					Started = true
+				end
+			end
+		end
+
+		if not Started then
+			StartSpawn()
+		end
+
+		return
+	end
+
+	local SelectedMode = self:_SelectMode(Mode)
+	Entry.Mode = SelectedMode
+
+	if SelectedMode == "spawn" then
+		StartSpawn()
 		return
 	end
 
 	if not self.RunService then
 		warn("[ToggleRunner] RunService missing; falling back to 'spawn' mode.")
-		return self:_StartLoop(Flag, OptObj, Callable, "spawn", Threshold, PassState)
+		StartSpawn()
+		return
 	end
 
 	if SelectedMode == "Heartbeat" then
-		local Acc = 0
-		Entry.Conn = self.RunService.Heartbeat:Connect(function(Dt)
-			if not self.Entries[Flag] or not Entry.Opt.Value then return end
-			Acc = Acc + Dt
-			if Acc >= Threshold then
-				Acc = (Threshold > 0) and (Acc - Threshold) or 0
-				DispatchTick()
-			end
-		end)
+		StartHeartbeat()
 		return
 	end
 
 	if SelectedMode == "RenderStepped" then
-		local Acc = 0
-		Entry.Conn = self.RunService.RenderStepped:Connect(function(Dt)
-			if not self.Entries[Flag] or not Entry.Opt.Value then return end
-			Acc = Acc + Dt
-			if Acc >= Threshold then
-				Acc = (Threshold > 0) and (Acc - Threshold) or 0
-				DispatchTick()
-			end
-		end)
+		StartRenderStepped()
 		return
 	end
 end
@@ -343,9 +430,10 @@ function ToggleRunner:BindToggle(Opt, Flag, Func, Opts)
 
 	self:_HookFluentUnloadOnce()
 
+	local Modes = self:_NormalizeModes(Mode)
 	local SelectedMode = self:_SelectMode(Mode)
 
-	if SelectedMode == "Call" then
+	if #Modes == 1 and SelectedMode == "Call" then
 		local OnCallable, OffCallable
 		if type(Func) == "table" then
 			OnCallable = self:_ToCallable(Func.on)
