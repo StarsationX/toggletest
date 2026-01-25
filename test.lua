@@ -120,10 +120,14 @@ function ToggleRunner:SetErrorMode(Mode)
 end
 
 function ToggleRunner:_HookFluentUnloadOnce()
-	if self.Hooked then return end
+	if self.Hooked then
+		return
+	end
 
 	local Fluent = self.Fluent
-	if typeof(Fluent) ~= "table" then return end
+	if typeof(Fluent) ~= "table" then
+		return
+	end
 
 	local UnloadSignal = rawget(Fluent, "Unloaded") or rawget(Fluent, "_unloaded") or rawget(Fluent, "Destroyed")
 	if typeof(UnloadSignal) == "RBXScriptSignal" then
@@ -171,7 +175,9 @@ end
 
 function ToggleRunner:_StopFlag(Flag)
 	local Entry = self.Entries[Flag]
-	if not Entry then return end
+	if not Entry then
+		return
+	end
 
 	if Entry.Conn then
 		pcall(function() Entry.Conn:Disconnect() end)
@@ -195,13 +201,19 @@ end
 
 function ToggleRunner:_WrapPath(Path)
 	local TableName, Sep, FuncName = Path:match("^([%w_]+)([:%.])([%w_]+)$")
-	if not TableName then return nil end
+	if not TableName then
+		return nil
+	end
 
 	local Root = self.RootResolver(TableName)
-	if type(Root) ~= "table" then return nil end
+	if type(Root) ~= "table" then
+		return nil
+	end
 
 	local Fn = Root[FuncName]
-	if type(Fn) ~= "function" then return nil end
+	if type(Fn) ~= "function" then
+		return nil
+	end
 
 	if Sep == ":" then
 		return function(...)
@@ -243,7 +255,7 @@ function ToggleRunner:_NormalizeModes(Mode)
 		local Out = {}
 		for _, M in ipairs(Mode) do
 			if type(M) == "string" then
-				Out[#Out+1] = M
+				Out[#Out + 1] = M
 			end
 		end
 		if #Out == 0 then
@@ -295,6 +307,37 @@ function ToggleRunner:_SelectMode(Mode)
 	return "spawn"
 end
 
+function ToggleRunner:_ResolveThreshold(Value)
+	if type(Value) == "function" then
+		local ok, res = pcall(Value)
+		if ok then
+			return tonumber(res) or 0
+		end
+		return 0
+	end
+	return tonumber(Value) or 0
+end
+
+function ToggleRunner:SetThreshold(Flag, Threshold)
+	local Entry = self.Entries[Flag]
+	if not Entry then
+		return false
+	end
+
+	local Opt = Entry.Opt
+	local Callable = Entry.Callable
+	local Mode = Entry.Mode
+	local PassState = Entry.PassState
+
+	Entry.Threshold = Threshold
+
+	if Opt and Opt.Value and Callable then
+		self:_StartLoop(Flag, Opt, Callable, Mode, Entry.Threshold, PassState)
+	end
+
+	return true
+end
+
 function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassState)
 	self:_StopFlag(Flag)
 
@@ -314,12 +357,15 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 	end
 
 	local function StartSpawn()
-		if Entry.Thread then return end
+		if Entry.Thread then
+			return
+		end
 		Entry.Thread = task.spawn(function()
 			while self.Entries[Flag] and Entry.Opt.Value do
 				DispatchTick()
-				if Threshold > 0 then
-					task.wait(Threshold)
+				local Th = self:_ResolveThreshold(Entry.Threshold)
+				if Th > 0 then
+					task.wait(Th)
 				else
 					task.wait()
 				end
@@ -330,10 +376,17 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 	local function StartHeartbeat()
 		local Acc = 0
 		local Conn = self.RunService.Heartbeat:Connect(function(Dt)
-			if not self.Entries[Flag] or not Entry.Opt.Value then return end
+			if not self.Entries[Flag] or not Entry.Opt.Value then
+				return
+			end
+			local Th = self:_ResolveThreshold(Entry.Threshold)
+			if Th <= 0 then
+				DispatchTick()
+				return
+			end
 			Acc = Acc + Dt
-			if Acc >= Threshold then
-				Acc = (Threshold > 0) and (Acc - Threshold) or 0
+			if Acc >= Th then
+				Acc = Acc - Th
 				DispatchTick()
 			end
 		end)
@@ -344,10 +397,17 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 	local function StartRenderStepped()
 		local Acc = 0
 		local Conn = self.RunService.RenderStepped:Connect(function(Dt)
-			if not self.Entries[Flag] or not Entry.Opt.Value then return end
+			if not self.Entries[Flag] or not Entry.Opt.Value then
+				return
+			end
+			local Th = self:_ResolveThreshold(Entry.Threshold)
+			if Th <= 0 then
+				DispatchTick()
+				return
+			end
 			Acc = Acc + Dt
-			if Acc >= Threshold then
-				Acc = (Threshold > 0) and (Acc - Threshold) or 0
+			if Acc >= Th then
+				Acc = Acc - Th
 				DispatchTick()
 			end
 		end)
@@ -358,10 +418,17 @@ function ToggleRunner:_StartLoop(Flag, OptObj, Callable, Mode, Threshold, PassSt
 	local function StartStepped()
 		local Acc = 0
 		local Conn = self.RunService.Stepped:Connect(function(_, Dt)
-			if not self.Entries[Flag] or not Entry.Opt.Value then return end
+			if not self.Entries[Flag] or not Entry.Opt.Value then
+				return
+			end
+			local Th = self:_ResolveThreshold(Entry.Threshold)
+			if Th <= 0 then
+				DispatchTick()
+				return
+			end
 			Acc = Acc + Dt
-			if Acc >= Threshold then
-				Acc = (Threshold > 0) and (Acc - Threshold) or 0
+			if Acc >= Th then
+				Acc = Acc - Th
 				DispatchTick()
 			end
 		end)
@@ -441,7 +508,7 @@ function ToggleRunner:BindToggle(Opt, Flag, Func, Opts)
 	Opts = Opts or {}
 
 	local Mode = Opts.mode or "spawn"
-	local Threshold = tonumber(Opts.threshold) or 0
+	local Threshold = Opts.threshold
 	local PassState = Opts.passState == true
 
 	local UserOnChanged = Opts.onChanged
