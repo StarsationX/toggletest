@@ -241,6 +241,8 @@ function ToggleRunner:_CleanupEntry(Entry)
 	end
 
 	Entry.Stopped = true
+	Entry.Pending = false
+	Entry.Running = false
 
 	if Entry.Connection then
 		SafeDisconnect(Entry.Connection)
@@ -266,7 +268,6 @@ function ToggleRunner:_CleanupEntry(Entry)
 	Entry.Connections = nil
 	Entry.Thread = nil
 	Entry.Threads = nil
-	Entry.Running = false
 end
 
 function ToggleRunner:StopAll()
@@ -301,6 +302,16 @@ function ToggleRunner:IsRunning(Flag)
 	local Entry = self.Entries[Flag]
 
 	return Entry ~= nil and Entry.Stopped ~= true
+end
+
+function ToggleRunner:IsBusy(Flag)
+	local Entry = self.Entries[Flag]
+
+	if not Entry then
+		return false
+	end
+
+	return Entry.Running == true or Entry.Pending == true
 end
 
 function ToggleRunner:_WrapPath(Path)
@@ -351,11 +362,11 @@ end
 
 function ToggleRunner:_Dispatch(Flag, Entry, Callable, PassState, StateValue)
 	if self.Destroyed then
-		return
+		return false
 	end
 
 	if Entry and Entry.Running and not Entry.AllowConcurrent then
-		return
+		return false
 	end
 
 	if Entry then
@@ -481,6 +492,7 @@ function ToggleRunner:_CreateEntry(Flag, OptObj, Callable, Mode, Threshold, Pass
 		PassState = PassState == true,
 		AllowConcurrent = AllowConcurrent == true or self.AllowConcurrent == true,
 		Running = false,
+		Pending = false,
 		Stopped = false,
 		Connections = {},
 		Threads = {}
@@ -496,7 +508,31 @@ function ToggleRunner:_DispatchTick(Flag, Entry)
 		return
 	end
 
+	if self.Entries[Flag] ~= Entry then
+		return
+	end
+
+	if Entry.Running and not Entry.AllowConcurrent then
+		return
+	end
+
+	if Entry.Pending and not Entry.AllowConcurrent then
+		return
+	end
+
+	Entry.Pending = true
+
 	task.spawn(function()
+		Entry.Pending = false
+
+		if self.Entries[Flag] ~= Entry or Entry.Stopped then
+			return
+		end
+
+		if Entry.Running and not Entry.AllowConcurrent then
+			return
+		end
+
 		self:_Dispatch(Flag, Entry, Entry.Callable, Entry.PassState, true)
 	end)
 end
